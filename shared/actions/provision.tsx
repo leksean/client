@@ -46,11 +46,14 @@ class ProvisioningManager {
   _stashedResponseKey: ValidCallback | null = null
   _addingANewDevice: boolean
   _done: boolean = false
+  _canceled: boolean = false
 
   constructor(addingANewDevice: boolean, _: 'ONLY_CALL_THIS_FROM_HELPER') {
     this._addingANewDevice = addingANewDevice
     ProvisioningManager.singleton = this
   }
+
+  isCanceled = () => this._canceled
 
   done = (reason: string) => {
     logger.info('ProvisioningManager.done', reason)
@@ -349,6 +352,18 @@ class ProvisioningManager {
     })
 
   maybeCancelProvision = () => {
+    logger.info('ProvisioningManager.maybeCancelProvision')
+
+    if (this._stashedResponse && this._stashedResponseKey) {
+      logger.info('ProvisioningManager - canceling ongoing stashed response')
+      Constants.cancelOnCallback(null, this._stashedResponse)
+      this._stashedResponse = null
+      this._stashedResponseKey = null
+    }
+
+    this._done = true
+    this._canceled = true
+
     // TODO fix
     // let root = state.routeTree.routeState && state.routeTree.routeState.selected
     // let onDevicesTab = root === devicesRoot[0]
@@ -387,7 +402,7 @@ const makeProvisioningManager = (addingANewDevice: boolean): ProvisioningManager
  * screens and we stash the result object so we can show the screen. When the submit on that screen is done we find the stashedReponse and respond and wait
  */
 function* startProvisioning(state: Container.TypedState) {
-  makeProvisioningManager(false)
+  const manager = makeProvisioningManager(false)
   try {
     const username = state.provision.username
     if (!username) {
@@ -409,9 +424,18 @@ function* startProvisioning(state: Container.TypedState) {
     })
     ProvisioningManager.getSingleton().done('provision call done w/ success')
   } catch (finalError) {
-    ProvisioningManager.getSingleton().done(
-      'provision call done w/ error' + finalError ? finalError.message : ' unknown error'
-    )
+    if (ProvisioningManager.getSingleton() !== manager) {
+      // Another provisioning session has started while this one was active.
+      // This is not desired and is an indication of a problem somewhere else.
+      logger.error(
+        `Provision.startProvisioning error, and ProvisioningManager has changed: ${finalError.message}`
+      )
+      return
+    } else if (manager.isCanceled()) {
+      return
+    }
+
+    manager.done('provision call done w/ error' + finalError ? finalError.message : ' unknown error')
     // If it's a non-existent username or invalid, allow the opportunity to
     // correct it right there on the page.
     switch (finalError.code) {
@@ -427,8 +451,8 @@ function* startProvisioning(state: Container.TypedState) {
 }
 
 function* addNewDevice() {
-  // Make a new handler each time just in case
-  makeProvisioningManager(true)
+  // Make a new handler each time.
+  const manager = makeProvisioningManager(true)
   try {
     yield RPCTypes.deviceDeviceAddRpcSaga({
       customResponseIncomingCallMap: ProvisioningManager.getSingleton().getCustomResponseIncomingCallMap(),
@@ -442,7 +466,16 @@ function* addNewDevice() {
     yield Saga.put(RouteTreeGen.createNavigateAppend({path: devicesRoot}))
     yield Saga.put(RouteTreeGen.createClearModals())
   } catch (finalError) {
-    ProvisioningManager.getSingleton().done(finalError.message)
+    if (ProvisioningManager.getSingleton() !== manager) {
+      // Another provisioning session has started while this one was active.
+      // This is not desired and is an indication of a problem somewhere else.
+      logger.error(`Provision.addNewDevice error, and ProvisioningManager has changed: ${finalError.message}`)
+      return
+    } else if (manager.isCanceled()) {
+      return
+    }
+
+    manager.done(finalError.message)
 
     yield Saga.put(ProvisionGen.createShowFinalErrorPage({finalError, fromDeviceAdd: true}))
     logger.error(`Provision -> Add device error: ${finalError.message}`)
@@ -568,6 +601,8 @@ function* provisionSaga() {
   yield* Saga.chainAction2(ProvisionGen.showPaperkeyPage, showPaperkeyPage)
   yield* Saga.chainAction2(ProvisionGen.showFinalErrorPage, showFinalErrorPage)
   yield* Saga.chainAction2(ProvisionGen.forgotUsername, forgotUsername)
+
+  yield* Saga.chainAction2(ProvisionGen.cancelProvision, maybeCancelProvision)
 }
 
 export const _testing = {

@@ -23,7 +23,10 @@ export default Container.compose(
       }
     },
     dispatch => ({
-      onBack: () => dispatch(RouteTreeGen.createNavigateUp()),
+      onBack: () => {
+        dispatch(ProvisionGen.createCancelProvision())
+        dispatch(RouteTreeGen.createNavigateUp())
+      },
       onSubmitTextCode: (code: string) =>
         dispatch(ProvisionGen.createSubmitTextCode({phrase: new HiddenString(code)})),
     }),
